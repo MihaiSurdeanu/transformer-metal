@@ -1,5 +1,3 @@
--DOCSTART-	O
-	
 EU	B-ORG
 rejects	O
 German	B-MISC
