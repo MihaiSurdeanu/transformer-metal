@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[14]:
+# In[1]:
 
 
 import platform
@@ -48,7 +48,7 @@ transformer_name = "bert-base-cased" # 'xlm-roberta-base' # 'distilbert-base-cas
 tokenizer = AutoTokenizer.from_pretrained(transformer_name)
 
 
-# In[15]:
+# In[2]:
 
 
 
@@ -115,12 +115,13 @@ def read_dataframe(fn, label_to_index, task_id):
     return pd.DataFrame(data)
 
 
-# In[16]:
+# In[3]:
 
 
 class Task():
-    def __init__(self, task_id, train_file_name, dev_file_name, test_file_name):
+    def __init__(self, task_id, task_name, train_file_name, dev_file_name, test_file_name):
         self.task_id = task_id
+        self.task_name = task_name
         # we need an index of labels first
         self.labels = read_label_set(train_file_name)
         self.index_to_label = {i:t for i,t in enumerate(self.labels)}
@@ -133,32 +134,33 @@ class Task():
                 
 
 
-# In[17]:
+# In[4]:
 
 
-ner_task = Task(0, "data/conll-ner/train_small.txt", "data/conll-ner/dev.txt", "data/conll-ner/test.txt")
-pos_task = Task(1, "data/pos/train_small.txt", "data/pos/dev.txt", "data/pos/test.txt")
+ner_task = Task(0, "NER", "data/conll-ner/train.txt", "data/conll-ner/dev.txt", "data/conll-ner/test.txt")
+pos_task = Task(1, "POS", "data/pos/train.txt", "data/pos/dev.txt", "data/pos/test.txt")
 
 
-# In[18]:
+# In[5]:
 
 
 ner_task.train_df
 
 
-# In[19]:
+# In[6]:
 
 
 pos_task.train_df
 
 
-# In[20]:
+# In[22]:
 
 
 from transformers.modeling_outputs import TokenClassifierOutput
 from transformers.models.bert.modeling_bert import BertModel, BertPreTrainedModel
 from transformers import PreTrainedModel
 from transformers import AutoConfig, AutoModel
+import os
 
 # This class is adapted from: https://towardsdatascience.com/how-to-create-and-train-a-multi-task-transformer-model-18c54a146240
 class TokenClassificationModel(BertPreTrainedModel):    
@@ -220,6 +222,71 @@ class TokenClassificationModel(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+    
+
+    def save_task(task_head, task, task_checkpoint):
+        numpy_weights = task_head.classifier.weight.cpu().detach().numpy()
+        numpy_bias = task_head.classifier.bias.cpu().detach().numpy()
+        labels = task.labels
+        #print(f"Shape of weights: {numpy_weights.shape}")
+        #print(f"Weights are:\n{numpy_weights}")
+        #print(f"Shape of bias: {numpy_bias.shape}")
+        #print(f"Bias is: {numpy_bias}")
+        #print(f"Labels are: {labels}")
+        
+        os.makedirs(task_checkpoint, exist_ok = True)
+        lf = open(task_checkpoint + "/labels", "w")
+        for label in labels:
+            lf.write(f'{label}\n')
+        lf.close()
+        
+        wf = open(task_checkpoint + "/weights", "w")
+        wf.write(f'{numpy_weights.shape[0]} {numpy_weights.shape[1]}\n')
+        for i, x in enumerate(numpy_weights):
+            for j, y in enumerate(x):
+                wf.write(f'{y} ')
+            wf.write('\n')
+        wf.close()
+        
+        bf = open(task_checkpoint + "/biases", "w")
+        bf.write(f'{numpy_bias.shape[0]}\n')
+        for i, x in enumerate(numpy_bias):
+            bf.write(f'{x} ')
+        bf.write('\n')
+        bf.close()
+
+    def onnx_save(self, checkpoint):
+        orig_words = ["Using", "transformers", "with", "ONNX", "runtime"]
+        token_input = tokenizer(orig_words, is_split_into_words = True, return_tensors = "pt")
+        print(token_input)
+        token_ids = token_input['input_ids'].to(device)
+        
+        inputs = (token_ids) 
+        input_names = ["token_ids"] 
+        output_names = ["sequence_output"]
+        
+        torch.onnx.export(self.bert,
+            inputs,
+            checkpoint,
+            export_params=True,
+            do_constant_folding=True,
+            input_names = input_names,
+            output_names = output_names,
+            opset_version=10, 
+            dynamic_axes = {"token_ids": {1: 'sent length'}}
+        )
+    
+    # exports model in a format friendly for ingestion on the JVM
+    def export_model(self, tasks, checkpoint_dir):
+        # save the weights/bias in each linear layer
+        for task in tasks:
+            task_checkpoint = checkpoint_dir + "/task_" + task.task_name
+            save_task(model.output_heads[str(task.task_id)], task, task_checkpoint)
+    
+        # save the encoder as an ONNX model
+        onnx_checkpoint = checkpoint_dir + '/encoder.onnx'
+        onnx_save(model, onnx_checkpoint)
+        
 
 class TokenClassificationHead(nn.Module):
     def __init__(self, hidden_size, num_labels, dropout_p=0.1):
@@ -254,7 +321,7 @@ class TokenClassificationHead(nn.Module):
         return logits, loss
 
 
-# In[22]:
+# In[23]:
 
 
 tasks = [ner_task, pos_task]
@@ -263,7 +330,7 @@ model= TokenClassificationModel.from_pretrained(transformer_name, config=config)
 model.summarize_heads()
 
 
-# In[23]:
+# In[15]:
 
 
 from sklearn.metrics import accuracy_score
@@ -285,7 +352,7 @@ def compute_metrics(eval_pred):
     return {'accuracy': accuracy_score(y_true, y_pred)}
 
 
-# In[24]:
+# In[10]:
 
 
 from datasets import Dataset, DatasetDict
@@ -302,7 +369,7 @@ pos_task.train_df = None
 ds
 
 
-# In[29]:
+# In[16]:
 
 
 from sklearn.metrics import classification_report
@@ -349,7 +416,7 @@ def evaluate(trainer, task, name):
     return scores, acc
 
 
-# In[30]:
+# In[24]:
 
 
 from transformers import TrainingArguments
@@ -358,7 +425,7 @@ from transformers import DataCollatorForTokenClassification
 import time
 from datetime import timedelta
 
-epochs = 2
+epochs = 4
 batch_size = 128
 weight_decay = 0.01
 use_mps_device = True if str(device) == 'mps' else False
@@ -409,18 +476,22 @@ for epoch in range(1, epochs + 1):
     macro_acc = (ner_acc + pos_acc)/2
     print(f'DEV MACRO ACC FOR EPOCH {epoch}: {macro_acc}')
 
+    # save the transformer encoder + the head for each task
     last_checkpoint = training_args.output_dir + '/mtl_model_epoch' + str(epoch)
     trainer.save_model(last_checkpoint)
+    
+    # export for JVM
+    model.export_model(tasks, last_checkpoint + "_export")
 
 
-# In[13]:
+# In[25]:
 
 
 #model = TokenClassificationModel.from_pretrained('bert-base-cased-mtl/mtl_model_epoch2', local_files_only=True)
 #model.summarize_heads()
 
 
-# In[32]:
+# In[26]:
 
 
 ner_acc = evaluation_classification_report(trainer, ner_task, "NER", useTest = True)
